@@ -20,8 +20,8 @@
 
 #include <max6675.h>
 
-#define DEBUG false
-const String versionString = "v0.21";
+const bool DEBUG = false;
+const String versionString = "v0.25";
 
 const int A_thermo_gnd_pin = 45;
 const int A_thermo_vcc_pin = 47;
@@ -39,14 +39,14 @@ int Static_Y = 0;
 
 MAX6675 A_thermocouple(A_thermo_sck_pin, A_thermo_cs_pin, A_thermo_so_pin);
 
-const int sendDataDelay = 115; // 115 is lower limit. Triggers AT errors when shorter delay is used.
-const unsigned long metadataFrequency = 4999;
+const unsigned long metadataFrequency = 5000;
 unsigned long lastMetadataMillis = 0;
 unsigned long now = millis();
+unsigned long lastNow = 0;
 
 void setup() {
-  Serial.begin(9600);
   Serial1.begin(115200);
+  Serial.begin(9600);
 
   // Setup the max6675 thermocuple module
   pinMode(A_thermo_vcc_pin, OUTPUT);
@@ -56,43 +56,35 @@ void setup() {
 
   sampleStaticJoystick();
 
-  // Announce yourself!
-  Serial.println("Datum Garage " + versionString);
-  Serial.println("Send Delay: " + String(sendDataDelay));
+    // Announce yourself!
+    Serial.println("Datum Garage NBP Streamer " + versionString);
 
   // Setup the AT communication. Is all of this even necessary?
-  sendData("AT+RST\r\n", 1500, DEBUG); // reset
-  sendData("AT+CIFSR\r\n", 1500, DEBUG); // query local IP address
-  sendData("AT+CIPMUX=1\r\n", 1500, DEBUG); // set multi mode
-  sendData("AT+CIPSERVER=1,80\r\n", 1500, DEBUG); // setup server
+  sendData("AT+RST\r\n", 1250); // reset
+//  sendData("AT+CIFSR\r\n", 1250); // query local IP address
+  sendData("AT+CIPMUX=1\r\n", 1250); // set multi mode
+  sendData("AT+CIPSERVER=1,80\r\n", 1250); // setup server
 }
+
+// Use these variables to count the number of broadcasts made each second.
+float broadcastFrequency = 0.0;
+unsigned int broadcastFrequencyCounter = 0;
+unsigned long lastBroadcastFrequencyTime = 0;
 
 void loop() {
   now = millis();
 
-  if (DEBUG){
-    Serial.println("loop(" + String(now) + ")");
-  }
+  // This is not / by 0 safe. Could happen
+  // todo KEEP track of last few cycles and average
+  broadcastFrequency = 1000.0 / (now - lastNow);
+  lastNow = now;
   
-  float a_temp = GetTemperatureA(); // read the temp from the K-thermo
-  
-  int relativeX = analogRead(X_pin) - Static_X;
-  int relativeY = analogRead(Y_pin) - Static_Y;
-
-  float calibX = relativeX / MM_calib;
-  float calibY = relativeY / MM_calib;
-
   // Build a string in the NBP v1.0 format
   String toBroadcast = "*NBP1,UPDATEALL," + String(now / 1000.0, 3) + "\n";
-  toBroadcast += "\"Ambient Temp\",\"C\":";
-  toBroadcast += String(a_temp, 2);
-  toBroadcast += "\n";
-  toBroadcast += "\"Movement X\",\"MM\":";
-  toBroadcast += String(calibX, 3);
-  toBroadcast += "\n";
-  toBroadcast += "\"Movement Y\",\"MM\":";
-  toBroadcast += String(calibY, 3);
-  toBroadcast += "\n";
+  toBroadcast += "\"Ambient Temp\",\"C\":" + String(GetTemperatureA(), 2) + "\n";
+  toBroadcast += "\"Movement X\",\"MM\":" + String((analogRead(X_pin) - Static_X) / MM_calib, 3) + "\n";
+  toBroadcast += "\"Movement Y\",\"MM\":" + String((analogRead(Y_pin) - Static_Y) / MM_calib, 3) + "\n";
+  toBroadcast += "\"Broadcast Freq.\",\"Hz\":" + String(broadcastFrequency, 2) + "\n";
   toBroadcast += "#\n";
 
   // Append the metadata if enough time has passed. Target is every 5 seconds.
@@ -100,64 +92,57 @@ void loop() {
   {
     lastMetadataMillis = now;
     toBroadcast += "@NAME:Datum Garage\n";
-    // toBroadcast += "@VERSION:" + versionString + "\n";
+    toBroadcast += "@VERSION:" + versionString + "\n";
   }
 
-  atCipSend(toBroadcast, DEBUG);
+    // Build the AT CIPSEND command line here.
+    String atCipSendCommand = "AT+CIPSEND=0," + String(toBroadcast.length()) + "\r\n";
+
+    // Send the command.
+    sendDataUntil(atCipSendCommand, 250, ">", "SEND-COMMAND");
+
+    // Send the string to broadcast.
+    sendDataUntil(toBroadcast, 250, "SEND OK", "SEND-PAYLOAD");
 }
 
-String sendData(String command, const int timeout, boolean debug) {
-  if (debug) {
-    Serial.print(command);
-  }
+void sendDataUntil(String command, const int timeout, String expected, String tracer){
+  Serial1.print(command); // send the command to the esp8266
 
   String response = "";
+  unsigned long time = millis();
+  bool keepTrying = true;
 
-  Serial1.print(command); // send the read character to the esp8266
+  while (keepTrying && (time + timeout) > millis()) {
+    while (keepTrying && Serial1.available()) {
+      char c = Serial1.read(); // read the next character.
+      response += c;
+      keepTrying = !response.endsWith(expected) || response.endsWith("ERROR");
+    }
+  }
+  if (DEBUG || response.indexOf("ERROR") > 0) {
+    Serial.println(tracer + " || " + response + " ||");
+  }
+}
 
-  long int time = millis();
+void sendData(String command, const int timeout) {
+  Serial1.print(command); // send the command to the esp8266
+
+  String response = "";
+  unsigned long time = millis();
+
   while ( (time + timeout) > millis()) {
     while (Serial1.available()) {
-      // output to the serial window
       char c = Serial1.read(); // read the next character.
       response += c;
     }
   }
-  if (debug) {
+  if (DEBUG) {
     Serial.print(response);
-  }
-  return response;
-}
-
-void atCipSend(String payload, boolean debug) {
-  String atCipSendCommand = "AT+CIPSEND=0," + String(payload.length()) + "\r\n";
-
-  Serial1.print(atCipSendCommand);
-
-  if (debug) {
-    Serial.println("Sent: " + atCipSendCommand);
-  }
-
-  if (Serial1.available()) {
-
-    if (Serial1.find(">")) {
-      if (debug) {
-        Serial.println("Found >");
-      }
-
-      Serial1.print(payload);
-
-      if (debug) {
-        Serial.println("Sent: " + payload);
-      }
-    } else {
-      Serial1.println("Not found!");
-    }
   }
 }
 
 unsigned long lastTempAReadingTime = 0;
-int minTempMilli = 250;
+int minTempMilli = 220;
 float lastTempAReading;
 
 float GetTemperatureA()
@@ -166,17 +151,13 @@ float GetTemperatureA()
     lastTempAReadingTime = millis();
     lastTempAReading = A_thermocouple.readCelsius();
     //lastTempAreading = A_thermocouple.readFahrenheit();
-
-    if (DEBUG){
-    Serial.println("GetTemperatureA(): " + String(lastTempAReading, 2));
-    }
   }
 
   return lastTempAReading;
 }
 
 void sampleStaticJoystick(){
-  delay(300);
+  delay(250);
   Static_X = analogRead(X_pin);
   Static_Y = analogRead(Y_pin);
 }
