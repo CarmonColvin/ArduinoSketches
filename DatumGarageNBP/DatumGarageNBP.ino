@@ -1,7 +1,7 @@
 #include <max6675.h>
 
 const bool DEBUG = false;
-const String versionString = "v0.28";
+const String versionString = "v0.29";
 
 // Define LED Pins
 const int RED = 5;
@@ -29,13 +29,17 @@ unsigned long lastMetadataMillis = 0;
 unsigned long now = millis();
 unsigned long lastNow = 0;
 
+unsigned long loopCount = 0;
+
 void setup() {
   // Setup and turn on the LED lights
   pinMode(RED, OUTPUT);
   pinMode(GREEN, OUTPUT);
+  pinMode(LED_BUILTIN, OUTPUT);
 
   digitalWrite(RED, HIGH);
   digitalWrite(GREEN, HIGH);
+  digitalWrite(LED_BUILTIN, HIGH);
 
   Serial1.begin(115200);
   Serial.begin(9600);
@@ -62,6 +66,7 @@ void setup() {
 
   digitalWrite(RED, LOW);
   digitalWrite(GREEN, LOW);
+  digitalWrite(LED_BUILTIN, LOW);
 }
 
 // Use these variables to count the number of broadcasts made each second.
@@ -87,6 +92,12 @@ float calculateFrequency() {
 
 void loop() {
   now = millis();
+  loopCount++;
+
+  if (loopCount % 25 == 0) {
+    analogWrite(GREEN, 30);
+    digitalWrite(LED_BUILTIN, HIGH);
+  }
 
   float broadcastFrequency = calculateFrequency();
   
@@ -98,6 +109,7 @@ void loop() {
   toBroadcast += "\"Movement X\",\"MM\":" + String((analogRead(X_pin) - Static_X) / MM_calib, 3) + "\n";
   toBroadcast += "\"Movement Y\",\"MM\":" + String((analogRead(Y_pin) - Static_Y) / MM_calib, 3) + "\n";
   toBroadcast += "\"Broadcast Freq.\",\"Hz\":" + String(broadcastFrequency, 1) + "\n";
+  toBroadcast += "\"Package Count\",\"EA\":" + String(loopCount) + "\n";
   toBroadcast += "#\n";
 
   // Append the metadata if enough time has passed. Target is every 5 seconds.
@@ -116,6 +128,12 @@ void loop() {
 
     // Send the string to broadcast.
     sendDataUntil(toBroadcast, 200, "SEND OK", "SEND-PAYLOAD");
+
+  if (loopCount % 25 == 0) {
+    digitalWrite(GREEN, LOW);
+    digitalWrite(RED, LOW);
+    digitalWrite(LED_BUILTIN, LOW);
+  }
 }
 
 void sendDataUntil(String command, const int timeout, String expected, String tracer){
@@ -132,7 +150,12 @@ void sendDataUntil(String command, const int timeout, String expected, String tr
       keepTrying = !response.endsWith(expected) || response.endsWith("ERROR");
     }
   }
-  if (DEBUG || response.indexOf("ERROR") > 0) {
+  bool foundError = response.indexOf("ERROR") > 0;
+
+  if (foundError) {
+    digitalWrite(RED, HIGH);
+  }
+  if (DEBUG || foundError) {
     Serial.println(tracer + " || " + String(millis()-time) + "ms || " + response.endsWith(expected) + " || " + response + " ||");
   }
 }
