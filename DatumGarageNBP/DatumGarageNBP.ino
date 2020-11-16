@@ -1,11 +1,15 @@
 #include <max6675.h>
 
 const bool DEBUG = false;
-const String versionString = "v0.29";
+const String versionString = "v0.34";
+
+// TODO: Don't start broadcasting until first inbound ping?
 
 // Define LED Pins
 const int RED = 5;
 const int GREEN = 6;
+
+const int blinkFrequency = 25;
 
 // Arduino pins for MAX6675 Thermocouple board
 const int A_thermo_gnd_pin = 45;
@@ -94,13 +98,12 @@ void loop() {
   now = millis();
   loopCount++;
 
-  if (loopCount % 25 == 0) {
+  if (loopCount % blinkFrequency == 0) {
     analogWrite(GREEN, 30);
     digitalWrite(LED_BUILTIN, HIGH);
   }
 
   float broadcastFrequency = calculateFrequency();
-  
   lastNow = now;
   
   // Build a string in the NBP v1.0 format
@@ -120,19 +123,68 @@ void loop() {
     toBroadcast += "@VERSION:" + versionString + "\n";
   }
 
-    // Build the AT CIPSEND command line.
-    String atCipSendCommand = "AT+CIPSEND=0," + String(toBroadcast.length()) + "\r\n";
+  sendNbpPackage(toBroadcast);
 
-    // Send the command.
-    sendDataUntil(atCipSendCommand, 200, ">", "SEND-COMMAND");
-
-    // Send the string to broadcast.
-    sendDataUntil(toBroadcast, 200, "SEND OK", "SEND-PAYLOAD");
-
-  if (loopCount % 25 == 0) {
+  if (loopCount % blinkFrequency == 0) {
     digitalWrite(GREEN, LOW);
     digitalWrite(RED, LOW);
     digitalWrite(LED_BUILTIN, LOW);
+  }
+}
+
+void sendNbpPackage(String nbpPackage){
+  String atCipSendCommand = "AT+CIPSEND=0," + String(nbpPackage.length()) + "\r\n";
+
+  Serial1.print(atCipSendCommand); // send the command to the esp8266
+
+  String response = "";
+  unsigned long time = millis();
+  bool keepTrying = true;
+  bool foundExpected = false;
+  bool foundError = false;
+
+  while (keepTrying && (time + 200) > millis()) {
+    while (keepTrying && Serial1.available()) {
+      char c = Serial1.read();
+      response += c;
+      foundExpected = response.endsWith(">");
+      foundError = response.endsWith("ERROR");
+      keepTrying = !foundExpected && !foundError;
+    }
+  }
+
+  if (DEBUG || foundError) {
+    Serial.println("sendNbpPackage-cmd | " + String(millis()-time) + "ms | " + (foundExpected ? "SUCCESS" : "")  + (foundError ? "ERROR" : ""));
+  }
+
+  if (foundError) {
+    digitalWrite(RED, HIGH);
+    delay(300);
+  } else if (foundExpected){
+    Serial1.print(nbpPackage);
+
+    response = "";
+    time = millis();
+    keepTrying = true;
+    foundExpected = false;
+    foundError = false;
+
+  while (keepTrying && (time + 200) > millis()) {
+    while (keepTrying && Serial1.available()) {
+      char c = Serial1.read();
+      response += c;
+      foundExpected = response.endsWith("SEND OK");
+      foundError = response.endsWith("ERROR");
+      keepTrying = !foundExpected && !foundError;
+    }
+  }
+
+    if (foundError) {
+      digitalWrite(RED, HIGH);
+    }
+    if (DEBUG || foundError) {
+      Serial.println("sendNbpPackage-pkg | " + String(millis()-time) + "ms | " + (foundExpected ? "SUCCESS" : "")  + (foundError ? "ERROR" : ""));
+    }
   }
 }
 
@@ -142,21 +194,24 @@ void sendDataUntil(String command, const int timeout, String expected, String tr
   String response = "";
   unsigned long time = millis();
   bool keepTrying = true;
+  bool foundExpected = false;
+  bool foundError = false;
 
   while (keepTrying && (time + timeout) > millis()) {
     while (keepTrying && Serial1.available()) {
       char c = Serial1.read();
       response += c;
-      keepTrying = !response.endsWith(expected) || response.endsWith("ERROR");
+      foundExpected = response.endsWith(expected);
+      foundError = response.endsWith("ERROR");
+      keepTrying = !foundExpected && !foundError;
     }
   }
-  bool foundError = response.indexOf("ERROR") > 0;
 
   if (foundError) {
     digitalWrite(RED, HIGH);
   }
   if (DEBUG || foundError) {
-    Serial.println(tracer + " || " + String(millis()-time) + "ms || " + response.endsWith(expected) + " || " + response + " ||");
+    Serial.println(tracer + " | " + String(millis()-time) + "ms | " + (foundExpected ? "SUCCESS" : "")  + (foundError ? "ERROR" : ""));
   }
 }
 
