@@ -1,35 +1,41 @@
 #include <max6675.h>
 
 const bool DEBUG = false;
-const String versionString = "v0.34";
-
-// TODO: Don't start broadcasting until first inbound ping?
+const String versionString = "v0.38";
 
 // Define LED Pins
-const int RED = 5;
-const int GREEN = 6;
+const byte RED = 5;
+const byte GREEN = 6;
 
-const int blinkFrequency = 25;
+const byte blinkFrequency = 25; // number of cycles to blink green light
 
-// Arduino pins for MAX6675 Thermocouple board
-const int A_thermo_gnd_pin = 45;
-const int A_thermo_vcc_pin = 47;
-const int A_thermo_so_pin  = 49;
-const int A_thermo_cs_pin  = 51;
-const int A_thermo_sck_pin = 53;
+// Arduino pins for MAX6675 Thermocouple board (A)
+const byte A_thermo_gnd_pin = 44;
+const byte A_thermo_vcc_pin = 46;
+const byte A_thermo_so_pin  = 48;
+const byte A_thermo_cs_pin  = 50;
+const byte A_thermo_sck_pin = 52;
+
+// Arduino pins for MAX6675 Thermocouple board (B)
+const byte B_thermo_gnd_pin = 32;
+const byte B_thermo_vcc_pin = 34;
+const byte B_thermo_so_pin  = 36;
+const byte B_thermo_cs_pin  = 38;
+const byte B_thermo_sck_pin = 40;
 
 // Arduino pins for joystick
-const int SW_pin = 2; // digital pin connected to switch output
-const int X_pin = 0; // analog pin connected to X output
-const int Y_pin = 1; // analog pin connected to Y output
+const byte SW_pin = 2; // digital pin connected to switch output
+const byte X_pin = 0; // analog pin connected to X output
+const byte Y_pin = 1; // analog pin connected to Y output
 const float MM_calib = 251.0;// rough calibration of 1mm of travel on joystick.
 int Static_X = 0;
 int Static_Y = 0;
 
 MAX6675 A_thermocouple(A_thermo_sck_pin, A_thermo_cs_pin, A_thermo_so_pin);
+MAX6675 B_thermocouple(B_thermo_sck_pin, B_thermo_cs_pin, B_thermo_so_pin);
 
-const unsigned long metadataFrequency = 5000;
-unsigned long lastMetadataMillis = 0;
+const unsigned long updateAllFrequency = 4000; // Milliseconds 1000 = 1sec.
+unsigned long lastUpdateAllMillis = 0;
 unsigned long now = millis();
 unsigned long lastNow = 0;
 
@@ -63,10 +69,10 @@ void setup() {
   // sendData("AT+UART_CUR=9600,8,1,0,0", 1250); // set ESP8266 baud rate to 9600
   // sendData("AT+UART_CUR=115200,8,1,0,0", 1250); // set ESP8266 baud rate to 115200
   // sendDataUntil("AT+CIFSR\r\n", 3000, "OK", "ip-address"); // query local IP address
-   sendDataUntil("AT+CIPMUX=1\r\n", 3000, "OK", "multi-mode"); // set multi mode
-   sendDataUntil("AT+CIPSERVER=1,80\r\n", 3000, "OK", "cip-server"); // setup server
+  sendDataUntil("AT+CIPMUX=1\r\n", 3000, "OK", "multi-mode"); // set multi mode
+  sendDataUntil("AT+CIPSERVER=1,80\r\n", 3000, "OK", "cip-server"); // setup server
 
-   Serial.println("Server configuration complete.");
+  Serial.println("Server configuration complete.");
 
   digitalWrite(RED, LOW);
   digitalWrite(GREEN, LOW);
@@ -74,24 +80,19 @@ void setup() {
 }
 
 // Use these variables to count the number of broadcasts made each second.
-float broadcastFrequency = 0.0;
-unsigned int broadcastFrequencyCounter = 0;
-unsigned long lastBroadcastFrequencyTime = 0;
+byte FrequencyIndex = 0;
+float FrequencySum = 0;
+const int FrequencyWindowSize = 40;
+float Frequencies[FrequencyWindowSize];
 
-const int frequencyHistoryDepth = 40;
-float frequencyHistory[frequencyHistoryDepth];
-
+// TODO: Make this a ping and read situation so it works more like a sensor would.
 float calculateFrequency() {
-    float currentFrequency = 1000.0 / (now - lastNow);
-    float frequencyHistoryTotal = currentFrequency;
-
-      for (int idx = frequencyHistoryDepth - 1; idx > 0; idx--){
-        frequencyHistory[idx] = frequencyHistory[idx-1];
-        frequencyHistoryTotal += frequencyHistory[idx-1];
-      }
-      frequencyHistory[0] = currentFrequency;
-      float averageFreq = frequencyHistoryTotal / frequencyHistoryDepth;
-      return averageFreq;
+  float currentFrequency = 1000.0 / (now - lastNow); // Calculate the current value;
+  FrequencySum -= Frequencies[FrequencyIndex]; // Remove oldest from sum;
+  Frequencies[FrequencyIndex] = currentFrequency; // Add newest reading to the window;
+  FrequencySum += currentFrequency; // Add newest frequency to sum;
+  FrequencyIndex = (FrequencyIndex+1) % FrequencyWindowSize; // Increment index, wrap to 0;
+  return FrequencySum / FrequencyWindowSize; // return the average
 }
 
 void loop() {
@@ -105,25 +106,15 @@ void loop() {
 
   float broadcastFrequency = calculateFrequency();
   lastNow = now;
-  
-  // Build a string in the NBP v1.0 format
-  String toBroadcast = "*NBP1,UPDATEALL," + String(now / 1000.0, 3) + "\n";
-  toBroadcast += "\"Ambient Temp\",\"C\":" + String(GetTemperatureA(), 2) + "\n";
-  toBroadcast += "\"Movement X\",\"MM\":" + String((analogRead(X_pin) - Static_X) / MM_calib, 3) + "\n";
-  toBroadcast += "\"Movement Y\",\"MM\":" + String((analogRead(Y_pin) - Static_Y) / MM_calib, 3) + "\n";
-  toBroadcast += "\"Broadcast Freq.\",\"Hz\":" + String(broadcastFrequency, 1) + "\n";
-  toBroadcast += "\"Package Count\",\"EA\":" + String(loopCount) + "\n";
-  toBroadcast += "#\n";
 
-  // Append the metadata if enough time has passed. Target is every 5 seconds.
-  if ((now - metadataFrequency) >= lastMetadataMillis)
-  {
-    lastMetadataMillis = now;
-    toBroadcast += "@NAME:Datum Garage\n";
-    toBroadcast += "@VERSION:" + versionString + "\n";
+  // Send the UpdateAll package on the specified frequency
+  // Send the Update package on all other loops
+  if ((now - lastUpdateAllMillis) >= updateAllFrequency) {
+    sendNbpPackage(GetUpdateAllNbpPackage(broadcastFrequency));
+    lastUpdateAllMillis += updateAllFrequency;
+  } else {
+    sendNbpPackage(GetUpdateNbpPackage(broadcastFrequency));
   }
-
-  sendNbpPackage(toBroadcast);
 
   if (loopCount % blinkFrequency == 0) {
     digitalWrite(GREEN, LOW);
@@ -132,7 +123,61 @@ void loop() {
   }
 }
 
-void sendNbpPackage(String nbpPackage){
+String GetUpdateAllNbpPackage(float broadcastFrequency) {
+  String toReturn = "*NBP1,UPDATEALL," + String(now / 1000.0, 3) + "\n";
+  toReturn += "\"Temp A\",\"C\":" + String(GetTemperatureA(), 2) + "\n";
+  toReturn += "\"Temp B\",\"C\":" + String(GetTemperatureB(), 2) + "\n";
+  toReturn += "\"Movement X\",\"MM\":" + String((analogRead(X_pin) - Static_X) / MM_calib, 3) + "\n";
+  toReturn += "\"Movement Y\",\"MM\":" + String((analogRead(Y_pin) - Static_Y) / MM_calib, 3) + "\n";
+  toReturn += "\"Bcst. Freq.\",\"Hz\":" + String(broadcastFrequency, 1) + "\n";
+  toReturn += "\"Pkg. Count\",\"EA\":" + String(loopCount) + "\n";
+  toReturn += "#\n";
+  toReturn += "@NAME:Datum Garage\n";
+  toReturn += "@VERSION:" + versionString + "\n";
+  return toReturn;
+}
+
+float lastTempA;
+float lastTempB;
+float lastX;
+float lastY;
+
+String GetUpdateNbpPackage(float broadcastFrequency) {
+  float currentTempA = GetTemperatureA();
+  float currentTempB = GetTemperatureB();
+  float currentX = (analogRead(X_pin) - Static_X) / MM_calib;
+  float currentY = (analogRead(Y_pin) - Static_Y) / MM_calib;
+
+  String toReturn = "*NBP1,UPDATE," + String(now / 1000.0, 3) + "\n";
+
+  if (lastTempA != currentTempA) {
+    lastTempA = currentTempA;
+    toReturn += "\"Temp A\",\"C\":" + String(currentTempA, 2) + "\n";
+  }
+
+  if (lastTempB != currentTempB) {
+    lastTempB = currentTempB;
+    toReturn += "\"Temp B\",\"C\":" + String(currentTempA, 2) + "\n";
+  }
+
+  if (lastX != currentX) {
+    lastX = currentX;
+    toReturn += "\"Movement X\",\"MM\":" + String(currentX, 3) + "\n";
+  }
+
+  if (lastY != currentY) {
+    lastY = currentY;
+    toReturn += "\"Movement Y\",\"MM\":" + String(currentY, 3) + "\n";
+  }
+
+  toReturn += "\"Bcst. Freq.\",\"Hz\":" + String(broadcastFrequency, 1) + "\n";
+  toReturn += "\"Pkg. Count\",\"EA\":" + String(loopCount) + "\n";
+  toReturn += "#\n";
+
+  return toReturn;
+}
+
+void sendNbpPackage(String nbpPackage) {
   String atCipSendCommand = "AT+CIPSEND=0," + String(nbpPackage.length()) + "\r\n";
 
   Serial1.print(atCipSendCommand); // send the command to the esp8266
@@ -154,13 +199,13 @@ void sendNbpPackage(String nbpPackage){
   }
 
   if (DEBUG || foundError) {
-    Serial.println("sendNbpPackage-cmd | " + String(millis()-time) + "ms | " + (foundExpected ? "SUCCESS" : "")  + (foundError ? "ERROR" : ""));
+    Serial.println("sendNbpPackage-cmd | " + String(millis() - time) + "ms | " + (foundExpected ? "SUCCESS" : "")  + (foundError ? "ERROR" : ""));
   }
 
   if (foundError) {
     digitalWrite(RED, HIGH);
     delay(300);
-  } else if (foundExpected){
+  } else if (foundExpected) {
     Serial1.print(nbpPackage);
 
     response = "";
@@ -169,26 +214,26 @@ void sendNbpPackage(String nbpPackage){
     foundExpected = false;
     foundError = false;
 
-  while (keepTrying && (time + 200) > millis()) {
-    while (keepTrying && Serial1.available()) {
-      char c = Serial1.read();
-      response += c;
-      foundExpected = response.endsWith("SEND OK");
-      foundError = response.endsWith("ERROR");
-      keepTrying = !foundExpected && !foundError;
+    while (keepTrying && (time + 200) > millis()) {
+      while (keepTrying && Serial1.available()) {
+        char c = Serial1.read();
+        response += c;
+        foundExpected = response.endsWith("SEND OK");
+        foundError = response.endsWith("ERROR");
+        keepTrying = !foundExpected && !foundError;
+      }
     }
-  }
 
     if (foundError) {
       digitalWrite(RED, HIGH);
     }
     if (DEBUG || foundError) {
-      Serial.println("sendNbpPackage-pkg | " + String(millis()-time) + "ms | " + (foundExpected ? "SUCCESS" : "")  + (foundError ? "ERROR" : ""));
+      Serial.println("sendNbpPackage-pkg | " + String(millis() - time) + "ms | " + (foundExpected ? "SUCCESS" : "")  + (foundError ? "ERROR" : ""));
     }
   }
 }
 
-void sendDataUntil(String command, const int timeout, String expected, String tracer){
+void sendDataUntil(String command, const int timeout, String expected, String tracer) {
   Serial1.print(command); // send the command to the esp8266
 
   String response = "";
@@ -211,43 +256,41 @@ void sendDataUntil(String command, const int timeout, String expected, String tr
     digitalWrite(RED, HIGH);
   }
   if (DEBUG || foundError) {
-    Serial.println(tracer + " | " + String(millis()-time) + "ms | " + (foundExpected ? "SUCCESS" : "")  + (foundError ? "ERROR" : ""));
-  }
-}
-
-void sendData(String command, const int timeout) {
-  Serial1.print(command); // send the command to the esp8266
-
-  String response = "";
-  unsigned long time = millis();
-
-  while ( (time + timeout) > millis()) {
-    while (Serial1.available()) {
-      char c = Serial1.read(); // read the next character.
-      response += c;
-    }
-  }
-  if (DEBUG) {
-    Serial.print(response);
+    Serial.println(tracer + " | " + String(millis() - time) + "ms | " + (foundExpected ? "SUCCESS" : "")  + (foundError ? "ERROR" : ""));
   }
 }
 
 unsigned long lastTempAReadingTime = 0;
-int minTempMilli = 220;
-float lastTempAReading;
+byte max6675ReadFrequency = 220;
+float lastTempAReading = -99.99;
 
 float GetTemperatureA()
 {
-  if (millis() - minTempMilli >= lastTempAReadingTime){
-    lastTempAReadingTime = millis();
+  if (millis() - lastTempAReadingTime >= max6675ReadFrequency ) {
     lastTempAReading = A_thermocouple.readCelsius();
     //lastTempAreading = A_thermocouple.readFahrenheit();
+    lastTempAReadingTime += max6675ReadFrequency;
   }
-
   return lastTempAReading;
 }
 
-void sampleStaticJoystick(){
+unsigned long lastTempBReadingTime = 0;
+float lastTempBReading = -99.99;
+
+float GetTemperatureB()
+{
+  if (millis() - lastTempBReadingTime >= max6675ReadFrequency ) {
+    lastTempBReading = B_thermocouple.readCelsius();
+    //lastTempBreading = B_thermocouple.readFahrenheit();
+    lastTempBReadingTime += max6675ReadFrequency;
+  }
+  return lastTempBReading;
+}
+
+/* 
+  Sample the neutral value of the joystick for relative movement calculation 
+*/
+void sampleStaticJoystick() {
   delay(250);
   Static_X = analogRead(X_pin);
   Static_Y = analogRead(Y_pin);
