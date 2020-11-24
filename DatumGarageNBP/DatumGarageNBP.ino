@@ -2,29 +2,35 @@
 
 const bool DEBUG = false;
 const bool ECHO_PACKAGE = false;
-const String versionString = "v0.43";
+const bool PLOTTER_PACKAGE = true;
+const String versionString = "v0.45";
 
 // Define LED Pins
 const byte RED = 12;
 const byte GREEN = LED_BUILTIN;
 
-const byte blinkFrequency = 25; // number of cycles to blink green light
+// Number of cycles to blink green status light
+const byte blinkFrequency = 25;
 
-// Arduino pins for MAX6675 Thermocouple board (A)
+// Pins for MAX6675 Thermocouple board (A)
 const byte A_thermo_sck_pin = 52;
 const byte A_thermo_cs_pin  = 50;
 const byte A_thermo_so_pin  = 48;
 const byte A_thermo_vcc_pin = 46;
 const byte A_thermo_gnd_pin = 44;
 
-// Arduino pins for MAX6675 Thermocouple board (B)
+// Pins for MAX6675 Thermocouple board (B)
 const byte B_thermo_sck_pin = 40;
 const byte B_thermo_cs_pin  = 38;
 const byte B_thermo_so_pin  = 36;
 const byte B_thermo_vcc_pin = 34;
 const byte B_thermo_gnd_pin = 32;
 
-// Arduino pins for joystick
+// Pins for synchronizing LED light and button switch
+const byte BLUE = 5;
+const byte synchroButton = 4;
+
+// Pins for joystick
 const byte SW_pin = 2; // digital pin connected to switch output
 const byte X_pin = 0; // analog pin connected to X output
 const byte Y_pin = 7; // analog pin connected to Y output
@@ -57,8 +63,14 @@ void setup() {
   // Setup serial connection for debugging
   Serial.begin(9600);
 
-  // Splash!
-  Serial.println("Datum Garage NBP Streamer " + versionString);
+  // Setup synchro LED and button
+  pinMode(BLUE, OUTPUT);
+  pinMode(synchroButton, INPUT_PULLUP);
+
+  if (!PLOTTER_PACKAGE){
+    // Splash!
+    Serial.println("Datum Garage NBP Streamer " + versionString);
+  }
 
   // Setup the max6675 thermocuple module as "A"
   pinMode(A_thermo_gnd_pin, OUTPUT);
@@ -77,16 +89,19 @@ void setup() {
 
   // Setup the AT communication.
   sendDataUntil("AT+RST\r\n", 1250, "ready", "AT Reset");
-  // sendData("AT+UART_CUR=9600,8,1,0,0", 1250); // set ESP8266 baud rate to 9600
-  // sendData("AT+UART_CUR=115200,8,1,0,0", 1250); // set ESP8266 baud rate to 115200
+  // sendDataUntil("AT+UART_CUR=9600,8,1,0,0", 1250, "OK", "Set Baud 9600"); // set ESP8266 baud rate to 9600
+  // sendDataUntil("AT+UART_CUR=115200,8,1,0,0", 1250, "OK", "Set Baud 115200"); // set ESP8266 baud rate to 115200
   // sendDataUntil("AT+CIFSR\r\n", 1250, "OK", "ip-address"); // query local IP address
   sendDataUntil("AT+CIPMUX=1\r\n", 1250, "OK", "Set Multi Mode"); // set multi mode
   sendDataUntil("AT+CIPSERVER=1,80\r\n", 1250, "OK", "Setup Server"); // setup server
 
+  // Turn off the LED lights
   digitalWrite(RED, LOW);
   digitalWrite(GREEN, LOW);
 
-  Serial.println("Server configuration complete.");
+  if (!PLOTTER_PACKAGE) {
+    Serial.println("Server configuration complete.");
+  }
 
   waitForConnection();
 }
@@ -145,13 +160,26 @@ float getBroadcastFrequency() {
   return CurrentAverageFrequency;
 }
 
+bool isSynchroLedOn = false;
+
+void checkSynchroLedStatus() {
+  // Is the button pushed?
+  if (digitalRead(synchroButton) == LOW) {
+    isSynchroLedOn = true;
+    digitalWrite(BLUE, HIGH);
+  } else {
+    digitalWrite(BLUE, LOW);
+    isSynchroLedOn = false;
+  }
+}
+
 void loop() {
   now = millis();
   loopCount++;
 
   broadcastFrequencyPing();
 
-  if(consecutiveErrorCount >= consecutiveErrorCountLimit){
+  if (consecutiveErrorCount >= consecutiveErrorCountLimit) {
     waitForConnection();
   }
 
@@ -159,13 +187,15 @@ void loop() {
     analogWrite(GREEN, 30);
   }
 
+  checkSynchroLedStatus();
+
   // Send the UpdateAll package on the specified frequency
   // Send the Update package on all other loops
   if ((now - lastUpdateAllMillis) >= updateAllFrequency) {
-    sendNbpPackage(GetUpdateAllNbpPackage());
+    sendNbpPackage(GetUpdateNbpPackage(true));
     lastUpdateAllMillis += updateAllFrequency;
   } else {
-    sendNbpPackage(GetUpdateNbpPackage());
+    sendNbpPackage(GetUpdateNbpPackage(false));
   }
 
   if (loopCount % blinkFrequency == 0) {
@@ -179,56 +209,70 @@ void loop() {
   }
 }
 
-String GetUpdateAllNbpPackage() {
-  String toReturn = "*NBP1,UPDATEALL," + String(now / 1000.0, 3) + "\n";
-  toReturn += "\"Temp A\",\"C\":" + String(GetTemperatureA(), 2) + "\n";
-  toReturn += "\"Temp B\",\"C\":" + String(GetTemperatureB(), 2) + "\n";
-  toReturn += "\"Movement X\",\"MM\":" + String((analogRead(X_pin) - Static_X) / MM_calib, 3) + "\n";
-  toReturn += "\"Movement Y\",\"MM\":" + String((analogRead(Y_pin) - Static_Y) / MM_calib, 3) + "\n";
-  toReturn += "\"Bcst. Freq.\",\"Hz\":" + String(getBroadcastFrequency(), 1) + "\n";
-  toReturn += "\"Pkg. Count\",\"EA\":" + String(loopCount) + "\n";
-  toReturn += "#\n";
-  toReturn += "@NAME:Datum Garage\n";
-  toReturn += "@VERSION:" + versionString + "\n";
-  return toReturn;
-}
-
 float lastTempA;
 float lastTempB;
 float lastX;
 float lastY;
+bool lastSyncFlag;
 
-String GetUpdateNbpPackage() {
+String GetUpdateNbpPackage(bool updateAll) {
   float currentTempA = GetTemperatureA();
   float currentTempB = GetTemperatureB();
   float currentX = (analogRead(X_pin) - Static_X) / MM_calib;
   float currentY = (analogRead(Y_pin) - Static_Y) / MM_calib;
+  bool currentSyncFlag = isSynchroLedOn;
+  float currentBroadcastFrequency = getBroadcastFrequency();
 
-  String toReturn = "*NBP1,UPDATE," + String(now / 1000.0, 3) + "\n";
-
-  if (lastTempA != currentTempA) {
+  String toReturn = "*NBP1,UPDATE" + String(updateAll ? "ALL" : "") + "," + String(now / 1000.0, 3) + "\n";
+  
+  if (updateAll || lastTempA != currentTempA) {
     lastTempA = currentTempA;
     toReturn += "\"Temp A\",\"C\":" + String(currentTempA, 2) + "\n";
   }
 
-  if (lastTempB != currentTempB) {
+  if (updateAll || lastTempB != currentTempB) {
     lastTempB = currentTempB;
     toReturn += "\"Temp B\",\"C\":" + String(currentTempB, 2) + "\n";
   }
 
-  if (lastX != currentX) {
+  if (updateAll || lastX != currentX) {
     lastX = currentX;
     toReturn += "\"Movement X\",\"MM\":" + String(currentX, 3) + "\n";
   }
 
-  if (lastY != currentY) {
+  if (updateAll || lastY != currentY) {
     lastY = currentY;
     toReturn += "\"Movement Y\",\"MM\":" + String(currentY, 3) + "\n";
   }
 
-  toReturn += "\"Bcst. Freq.\",\"Hz\":" + String(getBroadcastFrequency(), 1) + "\n";
+  if (updateAll || lastSyncFlag != currentSyncFlag) {
+    lastSyncFlag = currentSyncFlag;  
+    toReturn += "\"Sync Flag\",\"Y/N\":" + String((currentSyncFlag ? "1" : "0")) + "\n";
+  }
+
+  toReturn += "\"Bcst. Freq.\",\"Hz\":" + String(currentBroadcastFrequency, 1) + "\n";
   toReturn += "\"Pkg. Count\",\"EA\":" + String(loopCount) + "\n";
-  toReturn += "#\n";
+  toReturn += "#\n";  
+
+  if (updateAll){
+    toReturn += "@NAME:Datum Garage\n";
+    toReturn += "@VERSION:" + versionString + "\n";
+  }
+
+  if (PLOTTER_PACKAGE) {
+    Serial.println("TEMP_A,TEMP_B,X,Y,SYNC,FREQ,,,,,,,,,,");
+    Serial.print(currentTempA);
+    Serial.print(",");
+    Serial.print(currentTempB);
+    Serial.print(",");
+    Serial.print(currentX);
+    Serial.print(",");
+    Serial.print(currentY);
+    Serial.print(",");
+    Serial.print((currentSyncFlag ? "1" : "0"));
+    Serial.print(",");
+    Serial.println(currentBroadcastFrequency);
+  }
 
   return toReturn;
 }
@@ -319,7 +363,10 @@ void sendDataUntil(String command, const int timeout, String expected, String tr
   if (foundError) {
     analogWrite(RED, 200);
   }
-  Serial.println(tracer + " | " + String(millis() - time) + "ms | " + (foundExpected ? "SUCCESS" : "")  + (foundError ? "ERROR" : ""));
+
+  if (DEBUG){
+    Serial.println(tracer + " | " + String(millis() - time) + "ms | " + (foundExpected ? "SUCCESS" : "")  + (foundError ? "ERROR" : ""));
+  }
 }
 
 unsigned long lastTempAReadingTime = 0;
@@ -349,9 +396,8 @@ float GetTemperatureB()
   return lastTempBReading;
 }
 
-/*
-  Sample the neutral value of the joystick for relative movement calculation
-*/
+
+// Sample the neutral value of the joystick for relative movement calculation
 void sampleStaticJoystick() {
   delay(150);
   Static_X = analogRead(X_pin);
