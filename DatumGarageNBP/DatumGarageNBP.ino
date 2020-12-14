@@ -1,16 +1,22 @@
 #include <max6675.h>
 
+// Configuration Variables
 const bool DEBUG = false;
 const bool ECHO_PACKAGE = false;
-const bool PLOTTER_PACKAGE = true;
-const String versionString = "v0.45";
+const bool PLOTTER_PACKAGE = false;
+const bool KEEPALIVE_OFF = true; // Only supported in TrackAddict v4.6.4 and higher.
+const bool INCLUDE_META_IN_PACKAGE = false;
+
+// Meta Variables
+const String DEVICE_NAME = "Datum Garage";
+const String VERSION_STRING = "v0.48";
 
 // Define LED Pins
 const byte RED = 12;
 const byte GREEN = LED_BUILTIN;
 
 // Number of cycles to blink green status light
-const byte blinkFrequency = 25;
+const byte STATUS_BLINK_FREQUENCY = 25;
 
 // Pins for MAX6675 Thermocouple board (A)
 const byte A_thermo_sck_pin = 52;
@@ -26,12 +32,8 @@ const byte B_thermo_so_pin  = 36;
 const byte B_thermo_vcc_pin = 34;
 const byte B_thermo_gnd_pin = 32;
 
-// Pins for synchronizing LED light and button switch
-const byte BLUE = 5;
-const byte synchroButton = 4;
-
 // Pins for joystick
-const byte SW_pin = 2; // digital pin connected to switch output
+// const byte SW_pin = 2; // digital pin connected to switch output
 const byte X_pin = 0; // analog pin connected to X output
 const byte Y_pin = 7; // analog pin connected to Y output
 const float MM_calib = 251.0;// rough calibration of 1mm of travel on joystick.
@@ -63,13 +65,9 @@ void setup() {
   // Setup serial connection for debugging
   Serial.begin(9600);
 
-  // Setup synchro LED and button
-  pinMode(BLUE, OUTPUT);
-  pinMode(synchroButton, INPUT_PULLUP);
-
   if (!PLOTTER_PACKAGE){
     // Splash!
-    Serial.println("Datum Garage NBP Streamer " + versionString);
+    Serial.println(DEVICE_NAME + " " + VERSION_STRING);
   }
 
   // Setup the max6675 thermocuple module as "A"
@@ -137,6 +135,11 @@ void waitForConnection()
   if (DEBUG) {
     Serial.println("Connection Established");
   }
+
+  if (KEEPALIVE_OFF) { // Only supported in TrackAddict v4.6.4 and higher.
+    sendNbpPackage("@NAME:" + DEVICE_NAME + "\n@KEEPALIVE:OFF\n");
+  }
+
 }
 
 // Use these variables to count the number of broadcasts made each second.
@@ -160,19 +163,6 @@ float getBroadcastFrequency() {
   return CurrentAverageFrequency;
 }
 
-bool isSynchroLedOn = false;
-
-void checkSynchroLedStatus() {
-  // Is the button pushed?
-  if (digitalRead(synchroButton) == LOW) {
-    isSynchroLedOn = true;
-    digitalWrite(BLUE, HIGH);
-  } else {
-    digitalWrite(BLUE, LOW);
-    isSynchroLedOn = false;
-  }
-}
-
 void loop() {
   now = millis();
   loopCount++;
@@ -183,11 +173,9 @@ void loop() {
     waitForConnection();
   }
 
-  if (loopCount % blinkFrequency == 0) {
+  if (loopCount % STATUS_BLINK_FREQUENCY == 0) {
     analogWrite(GREEN, 30);
   }
-
-  checkSynchroLedStatus();
 
   // Send the UpdateAll package on the specified frequency
   // Send the Update package on all other loops
@@ -198,7 +186,7 @@ void loop() {
     sendNbpPackage(GetUpdateNbpPackage(false));
   }
 
-  if (loopCount % blinkFrequency == 0) {
+  if (loopCount % STATUS_BLINK_FREQUENCY == 0) {
     if (DEBUG) { // Blink differently when in debug mode
       analogWrite(GREEN, 200);
       analogWrite(RED, 200);
@@ -207,60 +195,68 @@ void loop() {
     digitalWrite(RED, LOW);
     digitalWrite(GREEN, LOW);
   }
+
+  int timeTaken = millis() - now;
+}
+
+// Convenience method for buidling a NBP content line with a float value.
+String buildNbpContentLine(String channel, String unit, float value, int precision) {
+  return "\"" + channel + "\",\"" + unit + "\":" + String(value, precision) + "\n";
+}
+
+// Convenience method for buidling a NBP content line with an integer value.
+String buildNbpContentLine(String channel, String unit, int value) {
+  return "\"" + channel + "\",\"" + unit + "\":" + String(value) + "\n";
 }
 
 float lastTempA;
 float lastTempB;
 float lastX;
 float lastY;
-bool lastSyncFlag;
 
 String GetUpdateNbpPackage(bool updateAll) {
   float currentTempA = GetTemperatureA();
   float currentTempB = GetTemperatureB();
   float currentX = (analogRead(X_pin) - Static_X) / MM_calib;
   float currentY = (analogRead(Y_pin) - Static_Y) / MM_calib;
-  bool currentSyncFlag = isSynchroLedOn;
   float currentBroadcastFrequency = getBroadcastFrequency();
 
   String toReturn = "*NBP1,UPDATE" + String(updateAll ? "ALL" : "") + "," + String(now / 1000.0, 3) + "\n";
   
   if (updateAll || lastTempA != currentTempA) {
     lastTempA = currentTempA;
-    toReturn += "\"Temp A\",\"C\":" + String(currentTempA, 2) + "\n";
+    toReturn += buildNbpContentLine("Temp A", "C", currentTempA, 2);
   }
 
   if (updateAll || lastTempB != currentTempB) {
     lastTempB = currentTempB;
-    toReturn += "\"Temp B\",\"C\":" + String(currentTempB, 2) + "\n";
+    toReturn += buildNbpContentLine("Temp B", "C", currentTempB, 2);
   }
 
   if (updateAll || lastX != currentX) {
     lastX = currentX;
-    toReturn += "\"Movement X\",\"MM\":" + String(currentX, 3) + "\n";
+    toReturn += buildNbpContentLine("Flex X", "MM", currentX, 3);
   }
 
   if (updateAll || lastY != currentY) {
     lastY = currentY;
-    toReturn += "\"Movement Y\",\"MM\":" + String(currentY, 3) + "\n";
+    toReturn += buildNbpContentLine("Flex Y", "MM", currentY, 3);
   }
 
-  if (updateAll || lastSyncFlag != currentSyncFlag) {
-    lastSyncFlag = currentSyncFlag;  
-    toReturn += "\"Sync Flag\",\"Y/N\":" + String((currentSyncFlag ? "1" : "0")) + "\n";
+  if (INCLUDE_META_IN_PACKAGE)
+  {
+    toReturn += buildNbpContentLine("Pkg Freq", "Hz", currentBroadcastFrequency, 1);
+    toReturn += buildNbpContentLine("Pkg Cnt", "Ea", loopCount);
   }
 
-  toReturn += "\"Bcst. Freq.\",\"Hz\":" + String(currentBroadcastFrequency, 1) + "\n";
-  toReturn += "\"Pkg. Count\",\"EA\":" + String(loopCount) + "\n";
   toReturn += "#\n";  
 
   if (updateAll){
-    toReturn += "@NAME:Datum Garage\n";
-    toReturn += "@VERSION:" + versionString + "\n";
+    toReturn += "@NAME:" + DEVICE_NAME + " " + VERSION_STRING + "\n";
   }
 
   if (PLOTTER_PACKAGE) {
-    Serial.println("TEMP_A,TEMP_B,X,Y,SYNC,FREQ,,,,,,,,,,");
+    Serial.println("TEMP_A,TEMP_B,X,Y,FREQ,,,,,,,,,,");
     Serial.print(currentTempA);
     Serial.print(",");
     Serial.print(currentTempB);
@@ -268,8 +264,6 @@ String GetUpdateNbpPackage(bool updateAll) {
     Serial.print(currentX);
     Serial.print(",");
     Serial.print(currentY);
-    Serial.print(",");
-    Serial.print((currentSyncFlag ? "1" : "0"));
     Serial.print(",");
     Serial.println(currentBroadcastFrequency);
   }
