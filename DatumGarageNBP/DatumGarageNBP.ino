@@ -195,8 +195,6 @@ void loop() {
     digitalWrite(RED, LOW);
     digitalWrite(GREEN, LOW);
   }
-
-  int timeTaken = millis() - now;
 }
 
 // Convenience method for buidling a NBP content line with a float value.
